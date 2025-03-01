@@ -8,10 +8,13 @@
 //! You should have received a copy of the GNU General Public License
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use drm_fourcc::DrmFourcc;
+use evdi::buffer::BufferId;
 use evdi::device_node::DeviceNode;
 use evdi::{device_config::DeviceConfig, handle::Handle};
 use gstreamer::glib::subclass::types::FromObject;
 use gstreamer::glib::translate::{FromGlibPtrBorrow, FromGlibPtrFull, ToGlibPtr};
+use gstreamer::Caps;
 use gstreamer::{
     glib::object::ObjectExt,
     prelude::{ElementExt, ElementExtManual, GstBinExt},
@@ -22,10 +25,12 @@ use gstreamer_app::AppSrc;
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, thread};
-use tokio::time::sleep;
+use tokio::sync::mpsc;
+use tokio::task;
 
 const AWAIT_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
@@ -40,16 +45,61 @@ fn create_device() -> std::io::Result<()> {
     Ok(())
 }
 
+pub struct Frame {
+    pub id: usize,
+    pub buffer: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub pixel_format: DrmFourcc,
+}
+
 #[tokio::main] // Rende main asincrono
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env::set_var("GST_DEBUG", "3");
     gstreamer::init()?;
-
+    //env::set_var("DISPLAY", ":0");
     let device = DeviceNode::get().unwrap();
     let device_config = DeviceConfig::sample();
 
+    let (tx, mut rx) = mpsc::channel::<Frame>(10);
+
+    let consumer = task::spawn(async move {
+        let pipeline = gstreamer::Pipeline::new();
+        let appsrc = gstreamer::ElementFactory::make("appsrc")
+            .build()
+            .unwrap();
+
+        let caps_str = "video/x-raw,format=BGRx,width=1920,height=1080,framerate=60/1";
+
+        let caps = Caps::from_str(caps_str).unwrap();
+        appsrc.set_property("caps", caps);
+
+        
+        pipeline.add(&appsrc).unwrap();
+        let sink = gstreamer::ElementFactory::make("glimagesink")
+            .build()
+            .unwrap();
+        pipeline.add(&sink).unwrap();
+
+        appsrc.link(&sink).unwrap();
+        
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+
+        while let Some(frame) = rx.recv().await {
+            let buffer = frame.buffer;
+
+            println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+            let gsbuffer = gstreamer::buffer::Buffer::from_slice(buffer);
+
+            let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
+            if result != gstreamer::FlowReturn::Ok {
+                eprintln!("❌ Errore nel push del buffer: {:?}", result);
+            }
+        }
+    });
+
     unsafe {
-        //env::set_var("DISPLAY", ":0");
 
         let unconnected_handle = device.open()?;
         let mut handle = unconnected_handle.connect(&device_config);
@@ -57,30 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mode = handle.events.await_mode(AWAIT_MODE_TIMEOUT).await?;
         let buffer_id = handle.new_buffer(&mode);
 
-        let pipeline = gstreamer::Pipeline::new();
-        //let appsrc = gstreamer::ElementFactory::make("videotestsrc").build().unwrap();
-        
-        
-        let appsrc = gstreamer::ElementFactory::make("videotestsrc")
-            .build()
-            .unwrap();
-        let appsrc = AppSrc::from_(appsrc);
-
-        pipeline.add(&appsrc).unwrap();
-
-        let sink = gstreamer::ElementFactory::make("glimagesink")
-            .build()
-            .unwrap();
-        pipeline.add(&sink).unwrap();
-
-        appsrc.link(&sink).unwrap();
-        pipeline.set_state(gstreamer::State::Playing).unwrap();
-
         println!("Dispositivo EVDI aperto con FD: {:?}", device);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut frames = 0;
+        let mut frame_count = 0;
         let mut count = 0;
 
         loop {
@@ -89,27 +118,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
             {
                 Ok(_) => {
+
                     let buf = handle.get_buffer(buffer_id).expect("Buffer esistente");
-                    let gsbuffer = Buffer::from_slice(buf.bytes());
+                    println!("{:?}", buf.pixel_format);
+                    let buf_data = buf.bytes(); // supponiamo che buf.bytes() restituisca una slice di byte
+                    let frame_data = buf_data.to_vec(); // Clona i dati
 
-                    appsrc.pus
-
-                    // Invia il buffer tramite appsrc
-                    let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
-                    if result != gstreamer::FlowReturn::Ok {
-                        eprintln!("❌ Errore nel push del buffer: {:?}", result);
-                    }
-                    frames += 1;
+                    tx.send(Frame { 
+                        id: frame_count,
+                        buffer: frame_data,
+                        width: buf.width,
+                        height: buf.height,
+                        stride: buf.stride,
+                        pixel_format: buf.pixel_format.unwrap()
+                    }).await.unwrap();
+                    frame_count += 1;
                 }
                 Err(e) => {
                     // Gestisci errore senza uscire
                     //println!("❌ Errore nell'aggiornamento del buffer: {:?}", e);
                 }
             }
-            println!("Count: {} Frames: {}", count, frames);
             count += 1;
         }
     }
+    consumer.await?;
 
     Ok(())
 }
