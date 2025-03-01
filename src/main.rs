@@ -9,10 +9,7 @@
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod linux;
-use linux::config::{
-    AWAIT_MODE_TIMEOUT,
-    UPDATE_BUFFER_TIMEOUT
-};
+use linux::screen::*;
 
 use std::env;
 use std::str::FromStr;
@@ -29,6 +26,11 @@ use gstreamer::{
     glib::object::ObjectExt,
     prelude::{ElementExt, ElementExtManual, GstBinExt}, FlowReturn,
 };
+
+use std::time::Duration;
+
+pub const AWAIT_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
