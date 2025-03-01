@@ -128,10 +128,12 @@ impl Screen {
             let appsrc = ElementFactory::make("appsrc").build().unwrap();
             
             let queue1 = ElementFactory::make("queue").build().unwrap();
-            let x264enc = ElementFactory::make("videoconvert")
+            let videoconvert = ElementFactory::make("videoconvert")
                 .build().unwrap();
+            let fpsdisplaysink = ElementFactory::make("fpsdisplaysink")
+            .build().unwrap();
             let queue2 = ElementFactory::make("queue").build().unwrap();
-            let sink = ElementFactory::make("glimagesink").build().unwrap();
+            let sink = ElementFactory::make("xvimagesink").build().unwrap();
 
             appsrc.set_property("caps", caps);
             appsrc.set_property("is-live", true);
@@ -140,14 +142,15 @@ impl Screen {
             pipeline.add_many(&[
                 &appsrc,
                 //&queue1, 
-                //&x264enc, 
+                //&videoconvert, 
+                //&fpsdisplaysink, 
                 //&queue2, 
                 &sink
             ]).unwrap();
 
             appsrc.link(&sink).unwrap();
-            
-            //queue1.link(&x264enc).unwrap();
+            //videoconvert.link(&fpsdisplaysink).unwrap();
+            //fpsdisplaysink.link(&sink).unwrap();
             //x264enc.link(&queue2).unwrap();
             //queue2.link(&sink).unwrap();
 
