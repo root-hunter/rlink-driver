@@ -8,13 +8,18 @@
 //! You should have received a copy of the GNU General Public License
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod linux;
+use linux::config::{
+    AWAIT_MODE_TIMEOUT,
+    UPDATE_BUFFER_TIMEOUT
+};
+
 use std::env;
 use std::str::FromStr;
 
 use tokio::task;
 use tokio::sync::mpsc;
 
-use rlink_driver::driver::config::*;
 use rlink_core::protocol::frame::Frame;
 
 use evdi::device_node::DeviceNode;
@@ -79,7 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Dispositivo EVDI aperto con FD: {:?}", device);
 
         let mut frame_count = 0;
-        let mut count = 0;
 
         loop {
             match handle
@@ -101,12 +105,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }).await.unwrap();
                     frame_count += 1;
                 }
-                Err(e) => {
-                    //println!("❌ Errore nell'aggiornamento del buffer: {:?}", e);
+                Err(_) => {
+                    //println!("Error: {:?}", e);
                 }
             }
-            count += 1;
         }
     }
-    Ok(())
 }
