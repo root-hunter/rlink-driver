@@ -8,53 +8,24 @@
 //! You should have received a copy of the GNU General Public License
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use drm_fourcc::DrmFourcc;
-use evdi::buffer::BufferId;
+use std::env;
+use std::str::FromStr;
+
+use tokio::task;
+use tokio::sync::mpsc;
+
+use rlink_driver::driver::config::*;
+use rlink_core::protocol::frame::Frame;
+
 use evdi::device_node::DeviceNode;
-use evdi::{device_config::DeviceConfig, handle::Handle};
-use gstreamer::glib::subclass::types::FromObject;
-use gstreamer::glib::translate::{FromGlibPtrBorrow, FromGlibPtrFull, ToGlibPtr};
+use evdi::device_config::DeviceConfig;
 use gstreamer::Caps;
 use gstreamer::{
     glib::object::ObjectExt,
-    prelude::{ElementExt, ElementExtManual, GstBinExt},
-    Buffer, FlowReturn,
+    prelude::{ElementExt, ElementExtManual, GstBinExt}, FlowReturn,
 };
 
-use gstreamer_app::AppSrc;
-
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{env, thread};
-use tokio::sync::mpsc;
-use tokio::task;
-
-const AWAIT_MODE_TIMEOUT: Duration = Duration::from_secs(5);
-const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
-
-fn create_device() -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open("/sys/devices/evdi/add")?;
-
-    file.write_all(b"1")?; // Scrive "1" nel file per creare il dispositivo
-    println!("✅ Dispositivo EVDI creato con successo");
-    Ok(())
-}
-
-pub struct Frame {
-    pub id: usize,
-    pub buffer: Vec<u8>,
-    pub width: usize,
-    pub height: usize,
-    pub stride: usize,
-    pub pixel_format: DrmFourcc,
-}
-
-#[tokio::main] // Rende main asincrono
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env::set_var("GST_DEBUG", "3");
     gstreamer::init()?;
@@ -64,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, mut rx) = mpsc::channel::<Frame>(10);
 
-    let consumer = task::spawn(async move {
+    task::spawn(async move {
         let pipeline = gstreamer::Pipeline::new();
         let appsrc = gstreamer::ElementFactory::make("appsrc")
             .build()
@@ -99,7 +70,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     unsafe {
-
         let unconnected_handle = device.open()?;
         let mut handle = unconnected_handle.connect(&device_config);
 
@@ -117,11 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
             {
                 Ok(_) => {
-
                     let buf = handle.get_buffer(buffer_id).expect("Buffer esistente");
-                    println!("{:?}", buf.pixel_format);
-                    let buf_data = buf.bytes(); // supponiamo che buf.bytes() restituisca una slice di byte
-                    let frame_data = buf_data.to_vec(); // Clona i dati
+                    let buf_data = buf.bytes();
+                    let frame_data = buf_data.to_vec();
 
                     tx.send(Frame { 
                         id: frame_count,
@@ -134,14 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     frame_count += 1;
                 }
                 Err(e) => {
-                    // Gestisci errore senza uscire
                     //println!("❌ Errore nell'aggiornamento del buffer: {:?}", e);
                 }
             }
             count += 1;
         }
     }
-    consumer.await?;
-
     Ok(())
 }

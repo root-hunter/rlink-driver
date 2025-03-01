@@ -11,4 +11,5 @@ gstreamer = "0.23.5"
 gstreamer-base = "0.23.5"
 gstreamer-video = "0.23.5"
 gstreamer-app = "0.23.5"
-drm-fourcc = "2.2.0"
+
+rlink-core = { path = "../core" }
