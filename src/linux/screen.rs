@@ -108,7 +108,7 @@ impl Screen {
         }
     }
 
-    fn get_appsrc_caps(config: ScreenConfig) -> gstreamer::Caps {
+    fn get_src_caps(config: ScreenConfig) -> gstreamer::Caps {
         let caps_str = format!(
             "video/x-raw,format={},width={},height={},framerate={}/1",
             config.format, config.width, config.height, config.framerate
@@ -141,9 +141,9 @@ impl Screen {
         self.channel_tx = Some(Arc::new(Mutex::new(tx)));
     }
 
-    fn setup_xvimagesink(&mut self, config: ScreenConfig) {
+    fn setup_x11_sink(&mut self, config: ScreenConfig) {
         self.setup(|| {
-            let caps = Screen::get_appsrc_caps(config.clone());
+            let caps = Screen::get_src_caps(config.clone());
 
             let pipeline = Pipeline::new();
             let appsrc = ElementFactory::make("appsrc")
@@ -163,101 +163,60 @@ impl Screen {
         });
     }
 
-    fn setup_xvimagesink_compressed(&mut self, config: ScreenConfig) {
+    fn setup_rtp_sink(&mut self, config: ScreenConfig, host: &str, port: u16) {
         self.setup(|| {
+            let caps = Screen::get_src_caps(config.clone());
+    
             let pipeline = Pipeline::new();
-
-            let appsrc = ElementFactory::make("appsrc").build().unwrap();
-            let queue = ElementFactory::make("queue").build().unwrap();
-            let x264enc = ElementFactory::make("x264enc").build().unwrap();
-            let h264parse = ElementFactory::make("h264parse").build().unwrap();
-            let avdec_h264 = ElementFactory::make("avdec_h264").build().unwrap();
-            let videoconvert1 = ElementFactory::make("videoconvert").build().unwrap();
-            let videoconvert2 = ElementFactory::make("videoconvert").build().unwrap();
-            let autovideosink = ElementFactory::make("autovideosink").build().unwrap();
-
-            let appsrc_caps =
-                Caps::from_str(&"video/x-raw,format=BGRx,width=1920,height=1080,framerate=60/1")
-                    .unwrap();
-
-            appsrc.set_property("caps", appsrc_caps);
-            appsrc.set_property("is-live", true);
-            appsrc.set_property("do-timestamp", true);
-
-            // Aggiungi gli elementi alla pipeline
-            pipeline
-                .add_many(&[
-                    &appsrc,
-                    &queue,
-                    &videoconvert1,
-                    &x264enc,
-                    &h264parse,
-                    &avdec_h264,
-                    &videoconvert2,
-                    &autovideosink,
-                ])
+            let appsrc = ElementFactory::make("appsrc")
+                .property("caps", caps)
+                .property("is-live", true)
+                .property("format", gstreamer::Format::Time)
+                .build()
                 .unwrap();
-
-            // Collega gli elementi
+            let queue = ElementFactory::make("queue").build().unwrap();
+            let convert = ElementFactory::make("videoconvert").build().unwrap();
+            // Encoder H.264
+            let encoder = ElementFactory::make("x264enc")
+                .property_from_str("bitrate", "8000") // Bitrate in kbps
+                .property_from_str("speed-preset", "ultrafast")
+                .property_from_str("tune", "zerolatency")
+                .build()
+                .unwrap();
+    
+            // Packetizzazione RTP per H.264
+            let rtp_pay = ElementFactory::make("rtph264pay")
+                //.property("config-interval", 1) // Necessario per alcuni player RTP
+                .build()
+                .unwrap();
+    
+            // UDP Sink per inviare il flusso RTP
+            let sink = ElementFactory::make("udpsink")
+                .property("host", host)
+                .property("port", port as i32)
+                .property("sync", false) // Se vuoi sincronizzazione con il clock di sistema
+                .property("async", false)
+                .build()
+                .unwrap();
+    
+            pipeline.add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &sink]).unwrap();
             appsrc.link(&queue).unwrap();
-            queue.link(&videoconvert1).unwrap();
-            videoconvert1.link(&x264enc).unwrap();
-            x264enc.link(&h264parse).unwrap();
-            h264parse.link(&avdec_h264).unwrap();
-            avdec_h264.link(&videoconvert2).unwrap();
-            videoconvert2.link(&autovideosink).unwrap();
-
-            // Imposta lo stato della pipeline su Playing
+            queue.link(&convert).unwrap();
+            convert.link(&encoder).unwrap();
+            encoder.link(&rtp_pay).unwrap();
+            rtp_pay.link(&sink).unwrap();
+    
             pipeline.set_state(gstreamer::State::Playing).unwrap();
-
+    
             return appsrc;
         });
     }
-
-    fn setup_udpsink(&mut self, config: ScreenConfig) {
-        self.setup(|| {
-            let caps_str = "format=BGRx";
-            let caps = Caps::from_str(caps_str).unwrap();
-
-            let pipeline = Pipeline::new();
-            let appsrc = ElementFactory::make("appsrc").build().unwrap();
-            let queue = ElementFactory::make("queue").build().unwrap();
-            let videoconvert = ElementFactory::make("videoconvert").build().unwrap();
-            let encoder = gstreamer::ElementFactory::make("x264enc").build().unwrap();
-            let queue2 = ElementFactory::make("queue").build().unwrap();
-            let sink = ElementFactory::make("autovideosink").build().unwrap();
-
-            appsrc.set_property("caps", caps);
-            //appsrc.set_property("is-live", true);
-            //appsrc.set_property("do-timestamp", true);
-
-            pipeline
-                .add_many(&[
-                    &appsrc,
-                    &queue,
-                    &videoconvert, // Aggiungi l'encoder
-                    &encoder,      // Aggiungi l'encoder
-                    &queue2,       // Aggiungi l'encoder
-                    &sink,
-                ])
-                .unwrap();
-
-            appsrc.link(&queue).unwrap();
-            queue.link(&videoconvert).unwrap(); // Collega a encoder
-            videoconvert.link(&encoder).unwrap(); // Collega a encoder
-            encoder.link(&queue2).unwrap(); // Collega il sink all'encoder
-            queue2.link(&sink).unwrap(); // Collega il sink all'encoder
-
-            pipeline.set_state(gstreamer::State::Playing).unwrap();
-
-            return appsrc;
-        });
-    }
+    
 
     fn init_channel(&mut self) {
         let config = self.config.clone();
 
-        //self.setup_compressed_xvimagesink(config);
-        self.setup_xvimagesink(config);
+        //self.setup_xvimagesink(config);
+        self.setup_rtp_sink(config, "0.0.0.0", 6000);
     }
 }
