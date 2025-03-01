@@ -115,7 +115,7 @@ impl Screen {
         );
     }
 
-    fn handle<F>(&mut self, config: ScreenConfig, setup_pipeline: F)
+    fn setup<F>(&mut self, config: ScreenConfig, setup_pipeline: F)
     where 
         F: Fn() -> gstreamer::Element
     {
@@ -142,8 +142,8 @@ impl Screen {
         self.channel_tx = Some(Arc::new(Mutex::new(tx)));
     }
 
-    fn handle_xvimagesink_v2(&mut self, config: ScreenConfig) {
-        self.handle(config.clone(), || {
+    fn setup_xvimagesink(&mut self, config: ScreenConfig) {
+        self.setup(config.clone(), || {
             let caps_str = Screen::get_caps_str(config.clone());
             let caps = Caps::from_str(caps_str.as_str()).unwrap();
 
@@ -167,69 +167,9 @@ impl Screen {
         });
     }
 
-
-    fn handle_xvimagesink(&mut self, config: ScreenConfig) {
-        let (
-            tx,
-            mut rx
-        ) = mpsc::channel::<Frame>(10);
-        let mut frame_count = 0;
-        self.handler = Some(task::spawn(async move {
-            let caps_str = Screen::get_caps_str(config);
-            let caps = Caps::from_str(caps_str.as_str()).unwrap();
-
-            let pipeline = Pipeline::new();
-            let appsrc = ElementFactory::make("appsrc").build().unwrap();
-            let sink = ElementFactory::make("xvimagesink").build().unwrap();
-            
-            // let queue1 = ElementFactory::make("queue").build().unwrap();
-            // let encoder = ElementFactory::make("x264enc").build().unwrap();  // Codificatore video
-            // let rtsp_sink = ElementFactory::make("rtspserversink").build().unwrap();  // Server RTSP
-            //rtsp_sink.set_property("location", "rtsp://127.0.0.1:8554/stream");
-
-            appsrc.set_property("caps", caps);
-            appsrc.set_property("is-live", true);
-            appsrc.set_property("do-timestamp", true);
-
-            pipeline.add_many(&[
-                &appsrc,
-                &sink
-            ]).unwrap();
-
-            // pipeline.add_many(&[
-            //     &appsrc,
-            //     &queue1,
-            //     &encoder,
-            //     &rtsp_sink
-            // ]).unwrap();
-
-
-            appsrc.link(&sink).unwrap();
-            
-            // appsrc.link(&queue1).unwrap();
-            // queue1.link(&encoder).unwrap();
-            // encoder.link(&rtsp_sink).unwrap();
-
-            pipeline.set_state(gstreamer::State::Playing).unwrap();
-
-            while let Some(frame) = rx.recv().await {
-                //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
-                let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
-
-                let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
-                if result != gstreamer::FlowReturn::Ok {
-                    eprintln!("❌ Errore nel push del buffer: {:?}", result);
-                } else {
-                    frame_count += 1;
-                }
-            }
-        }));
-        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
-    }
-
     fn init_channel(&mut self) {
         let config = self.config.clone();
 
-        self.handle_xvimagesink_v2(config);
+        self.setup_xvimagesink(config);
     }
 }
