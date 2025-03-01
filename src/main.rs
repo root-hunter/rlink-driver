@@ -75,7 +75,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let caps = Caps::from_str(caps_str).unwrap();
         appsrc.set_property("caps", caps);
 
-        
         pipeline.add(&appsrc).unwrap();
         let sink = gstreamer::ElementFactory::make("glimagesink")
             .build()
