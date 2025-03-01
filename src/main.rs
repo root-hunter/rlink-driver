@@ -15,7 +15,7 @@ use linux::screen::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gstreamer::init()?;
     
-    let mut screen = Screen::new(1920, 1080);
+    let mut screen = Screen::new(1920, 1080, 60);
     screen.init();
     screen.start().await?;
 

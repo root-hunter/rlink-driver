@@ -27,6 +27,7 @@ pub const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
 pub struct ScreenConfig {
     width: usize,
     height: usize,
+    framerate: usize,
     timeout_await_mode: Duration,
     timeout_update_buffer: Duration,
 }
@@ -38,11 +39,12 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(width: usize, height: usize) -> Self {
+    pub fn new(width: usize, height: usize, framerate: usize) -> Self {
         return Screen {
             config: ScreenConfig{
                 width,
                 height,
+                framerate,
                 timeout_await_mode: AWAIT_MODE_TIMEOUT,
                 timeout_update_buffer: UPDATE_BUFFER_TIMEOUT,
             },
@@ -51,50 +53,8 @@ impl Screen {
         };
     }
 
-    fn init_handler(&mut self) {
-        let (tx, mut rx) = mpsc::channel::<Frame>(10);
-        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
-        
-        let config = self.config.clone();
-
-        let width = config.width;
-        let height = config.height;
-
-        self.handler = Some(task::spawn(async move {
-            let pipeline = gstreamer::Pipeline::new();
-            let appsrc = gstreamer::ElementFactory::make("appsrc").build().unwrap();
-
-            let caps_str = format!("video/x-raw,format=BGRx,width={},height={},framerate=60/1", width, height);
-
-            let caps = Caps::from_str(caps_str.as_str()).unwrap();
-            appsrc.set_property("caps", caps);
-
-            pipeline.add(&appsrc).unwrap();
-            let sink = gstreamer::ElementFactory::make("glimagesink")
-                .build()
-                .unwrap();
-            pipeline.add(&sink).unwrap();
-
-            appsrc.link(&sink).unwrap();
-
-            pipeline.set_state(gstreamer::State::Playing).unwrap();
-
-            while let Some(frame) = rx.recv().await {
-                let buffer = frame.buffer;
-
-                println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
-                let gsbuffer = gstreamer::buffer::Buffer::from_slice(buffer);
-
-                let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
-                if result != gstreamer::FlowReturn::Ok {
-                    eprintln!("❌ Errore nel push del buffer: {:?}", result);
-                }
-            }
-        }));
-    }
-
     pub fn init(&mut self) {
-        self.init_handler();
+        self.init_channel();
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -145,5 +105,50 @@ impl Screen {
                 }
             }
         }
+    }
+
+    fn get_caps_str(config: ScreenConfig) -> String{
+        return format!(
+            "video/x-raw,format=BGRx,width={},height={},framerate={}/1", 
+            config.width, config.height, config.framerate
+        );
+    }
+
+    fn init_channel(&mut self) {
+        let config = self.config.clone();
+        let (tx, mut rx) = mpsc::channel::<Frame>(10);
+
+        self.handler = Some(task::spawn(async move {
+            let pipeline = gstreamer::Pipeline::new();
+            let appsrc = gstreamer::ElementFactory::make("appsrc").build().unwrap();
+
+            let caps_str = Screen::get_caps_str(config);
+            let caps = Caps::from_str(caps_str.as_str()).unwrap();
+            appsrc.set_property("caps", caps);
+
+            pipeline.add(&appsrc).unwrap();
+            let sink = gstreamer::ElementFactory::make("glimagesink")
+                .build()
+                .unwrap();
+            pipeline.add(&sink).unwrap();
+
+            appsrc.link(&sink).unwrap();
+
+            pipeline.set_state(gstreamer::State::Playing).unwrap();
+
+            while let Some(frame) = rx.recv().await {
+                let buffer = frame.buffer;
+
+                println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+                let gsbuffer = gstreamer::buffer::Buffer::from_slice(buffer);
+
+                let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
+                if result != gstreamer::FlowReturn::Ok {
+                    eprintln!("❌ Errore nel push del buffer: {:?}", result);
+                }
+            }
+        }));
+        
+        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
     }
 }
