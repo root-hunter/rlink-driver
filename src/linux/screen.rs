@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::env;
 use std::str::FromStr;
 
+use gstreamer::prelude::GstBinExtManual;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::task::{self, JoinHandle};
 
@@ -11,37 +12,39 @@ use rlink_core::protocol::frame::Frame;
 
 use evdi::device_config::DeviceConfig;
 use evdi::device_node::DeviceNode;
-use gstreamer::Caps;
 use gstreamer::{
     glib::object::ObjectExt,
     prelude::{ElementExt, ElementExtManual, GstBinExt},
     FlowReturn,
 };
+use gstreamer::{Caps, ElementFactory, Pipeline};
 
 pub const AWAIT_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
 
-#[derive(
-    Debug, Clone
-)]
+#[derive(Debug, Clone)]
 pub struct ScreenConfig {
     width: usize,
     height: usize,
     framerate: usize,
+    format: gstreamer_video::VideoFormat,
     timeout_await_mode: Duration,
     timeout_update_buffer: Duration,
 }
 
 pub struct Screen {
-    config: ScreenConfig,    
+    config: ScreenConfig,
     channel_tx: Option<Arc<Mutex<Sender<Frame>>>>,
     handler: Option<JoinHandle<()>>,
 }
 
 impl Screen {
     pub fn new(width: usize, height: usize, framerate: usize) -> Self {
+        let format = gstreamer_video::VideoFormat::Bgrx;
+
         return Screen {
-            config: ScreenConfig{
+            config: ScreenConfig {
+                format,
                 width,
                 height,
                 framerate,
@@ -58,8 +61,6 @@ impl Screen {
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        env::set_var("GST_DEBUG", "3");
-
         let device = DeviceNode::get().unwrap();
         let device_config = DeviceConfig::sample();
 
@@ -107,48 +108,64 @@ impl Screen {
         }
     }
 
-    fn get_caps_str(config: ScreenConfig) -> String{
+    fn get_caps_str(config: ScreenConfig) -> String {
         return format!(
-            "video/x-raw,format=BGRx,width={},height={},framerate={}/1", 
-            config.width, config.height, config.framerate
+            "video/x-raw,format={},width={},height={},framerate={}/1",
+            config.format, config.width, config.height, config.framerate
         );
     }
 
     fn init_channel(&mut self) {
         let config = self.config.clone();
-        let (tx, mut rx) = mpsc::channel::<Frame>(10);
+        let (tx, mut rx) = mpsc::channel::<Frame>(1);
+        let mut frame_count = 0;
 
         self.handler = Some(task::spawn(async move {
-            let pipeline = gstreamer::Pipeline::new();
-            let appsrc = gstreamer::ElementFactory::make("appsrc").build().unwrap();
-
             let caps_str = Screen::get_caps_str(config);
             let caps = Caps::from_str(caps_str.as_str()).unwrap();
-            appsrc.set_property("caps", caps);
 
-            pipeline.add(&appsrc).unwrap();
-            let sink = gstreamer::ElementFactory::make("glimagesink")
-                .build()
-                .unwrap();
-            pipeline.add(&sink).unwrap();
+            let pipeline = Pipeline::new();
+            let appsrc = ElementFactory::make("appsrc").build().unwrap();
+            
+            let queue1 = ElementFactory::make("queue").build().unwrap();
+            let x264enc = ElementFactory::make("videoconvert")
+                .build().unwrap();
+            let queue2 = ElementFactory::make("queue").build().unwrap();
+            let sink = ElementFactory::make("glimagesink").build().unwrap();
+
+            appsrc.set_property("caps", caps);
+            appsrc.set_property("is-live", true);
+            appsrc.set_property("do-timestamp", true);
+
+            pipeline.add_many(&[
+                &appsrc,
+                //&queue1, 
+                //&x264enc, 
+                //&queue2, 
+                &sink
+            ]).unwrap();
 
             appsrc.link(&sink).unwrap();
+            
+            //queue1.link(&x264enc).unwrap();
+            //x264enc.link(&queue2).unwrap();
+            //queue2.link(&sink).unwrap();
 
             pipeline.set_state(gstreamer::State::Playing).unwrap();
 
             while let Some(frame) = rx.recv().await {
-                let buffer = frame.buffer;
-
-                println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
-                let gsbuffer = gstreamer::buffer::Buffer::from_slice(buffer);
+                //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+                let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
 
                 let result: FlowReturn = appsrc.emit_by_name("push-buffer", &[&gsbuffer]);
                 if result != gstreamer::FlowReturn::Ok {
                     eprintln!("❌ Errore nel push del buffer: {:?}", result);
+                } else {
+                    frame_count += 1;
                 }
             }
         }));
-        
+
         self.channel_tx = Some(Arc::new(Mutex::new(tx)));
     }
 }

@@ -11,8 +11,11 @@
 mod linux;
 use linux::screen::*;
 
+use std::env;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env::set_var("GST_DEBUG", "3");
     gstreamer::init()?;
     
     let mut screen = Screen::new(1920, 1080, 60);
