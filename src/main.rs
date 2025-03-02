@@ -9,6 +9,10 @@
 //! along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod linux;
+use gstreamer_rtsp_server::{
+    prelude::{RTSPMediaFactoryExt, RTSPMountPointsExt, RTSPServerExt, RTSPServerExtManual},
+    RTSPMediaFactory, RTSPServer, RTSPTransportMode,
+};
 use linux::screen::*;
 
 use std::env;
@@ -17,7 +21,7 @@ use std::env;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env::set_var("GST_DEBUG", "3");
     gstreamer::init()?;
-    
+
     let mut screen = Screen::new(1920, 1080, 60);
     screen.init();
     screen.start().await?;
