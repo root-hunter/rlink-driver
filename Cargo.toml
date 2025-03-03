@@ -13,4 +13,13 @@ gstreamer-video = "0.23.5"
 gstreamer-app = "0.23.5"
 gstreamer-rtsp-server = "0.23.5"
 
+webrtc = "0.12"
+warp = "0.3.7"  # Per gestire WebSocket e HTTP
+warp-cors = "0.3" # Aggiungi questa linea
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hyper = { version = "1.6.0", features = ["full"] }
+
+
+
 rlink-core = { path = "../core" }

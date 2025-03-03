@@ -2,9 +2,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use std::str::FromStr;
-use std::{env, fs};
-
 use gstreamer::glib::clone::Downgrade;
 use gstreamer::glib::object::Cast;
 use gstreamer::prelude::{GObjectExtManualGst, GstBinExtManual};
@@ -12,6 +9,8 @@ use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use gstreamer_rtsp_server::prelude::{
     RTSPMediaFactoryExt, RTSPMountPointsExt, RTSPServerExt, RTSPServerExtManual,
 };
+use std::str::FromStr;
+use std::{env, fs};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::{self, JoinHandle};
 
@@ -43,7 +42,9 @@ pub struct ScreenConfig {
 pub struct Screen {
     config: ScreenConfig,
     channel_tx: Option<Arc<Mutex<Sender<Frame>>>>,
-    sink: Option<JoinHandle<()>>,
+    pub pipeline: Option<Pipeline>,
+    pub appsink: Option<AppSink>,
+    pub appsrc_thread: Option<JoinHandle<()>>,
 }
 
 impl Screen {
@@ -59,13 +60,23 @@ impl Screen {
                 timeout_await_mode: AWAIT_MODE_TIMEOUT,
                 timeout_update_buffer: UPDATE_BUFFER_TIMEOUT,
             },
-            sink: None,
+            pipeline: None,
+            appsink: None,
+            appsrc_thread: None,
             channel_tx: None,
         };
     }
 
-    pub fn init(&mut self) {
-        self.init_channel();
+    pub fn init(&mut self) -> Option<AppSink> {
+        let config = self.config.clone();
+
+        //self.setup_xvimagesink(config);
+        //self.setup_rtsp_server(config);    }
+        //self.setup_appsink(config, "0.0.0.0", 6000);
+        self.setup_rtp_sink(config, "0.0.0.0", 6000);
+
+        return None;
+        //return self.appsink.as_ref().unwrap().clone();
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -127,31 +138,23 @@ impl Screen {
 
     fn setup<F>(&mut self, setup_pipeline: F)
     where
-        F: Fn() -> (gstreamer::Pipeline, gstreamer::Element, gstreamer::Element),
+        F: Fn() -> (),
     {
-        let (tx, mut rx) = mpsc::channel::<Frame>(10);
-        let mut frame_count = 0;
-        let (pipeline, src, sink) = setup_pipeline();
-        
-        let appsrc = src.clone().downcast::<AppSrc>().unwrap();
-
-        self.sink = Some(task::spawn(async move {
-            match pipeline.set_state(gstreamer::State::Playing) {
-                Ok(_) => println!("Pipeline started successfully"),
-                Err(err) => eprintln!("Failed to start pipeline: {:?}", err),
-            }
-            while let Some(frame) = rx.recv().await {
-                //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
-                let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
-                match appsrc.push_buffer(gsbuffer) {
-                    Ok(FlowSuccess::Ok) => (),
-                    Ok(_) => eprintln!("Frame push returned non-Ok flow"),
-                    Err(err) => eprintln!("Error pushing frame: {:?}", err),
-                }
-            }
-        }));
-
-        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
+        // let (tx, mut rx) = mpsc::channel::<Frame>(10);
+        // let mut frame_count = 0;
+        // setup_pipeline();
+        // self.appsrc_thread = Some(task::spawn(async move {
+        //     while let Some(frame) = rx.recv().await {
+        //         //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+        //         let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
+        //         match appsrc.push_buffer(gsbuffer) {
+        //             Ok(FlowSuccess::Ok) => (),
+        //             Ok(_) => eprintln!("Frame push returned non-Ok flow"),
+        //             Err(err) => eprintln!("Error pushing frame: {:?}", err),
+        //         }
+        //     }
+        // }));
+        //self.channel_tx = Some(Arc::new(Mutex::new(tx)));
     }
 
     fn setup_x11_sink(&mut self, config: ScreenConfig) {
@@ -171,70 +174,134 @@ impl Screen {
 
             src.link(&sink).unwrap();
             pipeline.set_state(gstreamer::State::Playing).unwrap();
-
-            return (pipeline, src, sink);
         });
     }
 
     fn setup_rtp_sink(&mut self, config: ScreenConfig, host: &str, port: u16) {
-        self.setup(|| {
-            let caps = Screen::get_src_caps(config.clone());
+        let (tx, mut rx) = mpsc::channel::<Frame>(10);
+        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
 
-            let pipeline = Pipeline::new();
-            let src = ElementFactory::make("appsrc")
-                .property("caps", caps)
-                .property("is-live", true)
-                .property("format", gstreamer::Format::Time)
-                .build()
-                .unwrap();
-            let queue = ElementFactory::make("queue").build().unwrap();
-            let convert = ElementFactory::make("videoconvert").build().unwrap();
-            // Encoder H.264
-            let encoder = ElementFactory::make("x264enc")
-                .property_from_str("bitrate", "8000") // Bitrate in kbps
-                .property("byte-stream", true)
-                .property_from_str("speed-preset", "ultrafast")
-                .property_from_str("tune", "zerolatency")
-                .build()
-                .unwrap();
+        let caps = Screen::get_src_caps(config.clone());
 
-            // Packetizzazione RTP per H.264
-            let rtp_pay = ElementFactory::make("rtph264pay")
-                //.property("config-interval", 1) // Necessario per alcuni player RTP
-                .property_from_str("aggregate-mode", "zero-latency")
-                .build()
-                .unwrap();
+        let pipeline = Pipeline::new();
+        let appsrc = ElementFactory::make("appsrc")
+            .property("caps", caps)
+            .property("is-live", true)
+            .property("format", gstreamer::Format::Time)
+            .build()
+            .unwrap();
+        let queue = ElementFactory::make("queue").build().unwrap();
+        let convert = ElementFactory::make("videoconvert").build().unwrap();
+        // Encoder H.264
+        let encoder = ElementFactory::make("x264enc")
+            .property_from_str("bitrate", "8000") // Bitrate in kbps
+            .property("byte-stream", true)
+            .property_from_str("speed-preset", "ultrafast")
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
 
-            // UDP Sink per inviare il flusso RTP
-            let sink = ElementFactory::make("udpsink")
-                .property("host", host)
-                .property("port", port as i32)
-                .property("sync", true) // Se vuoi sincronizzazione con il clock di sistema
-                .property("async", true)
-                .build()
-                .unwrap();
+        // Packetizzazione RTP per H.264
+        let rtp_pay = ElementFactory::make("rtph264pay")
+            //.property("config-interval", 1) // Necessario per alcuni player RTP
+            .property_from_str("aggregate-mode", "zero-latency")
+            .build()
+            .unwrap();
 
-            pipeline
-                .add_many(&[&src, &queue, &convert, &encoder, &rtp_pay, &sink])
-                .unwrap();
-            src.link(&queue).unwrap();
-            queue.link(&convert).unwrap();
-            convert.link(&encoder).unwrap();
-            encoder.link(&rtp_pay).unwrap();
-            rtp_pay.link(&sink).unwrap();
+        // UDP Sink per inviare il flusso RTP
+        let appsink = ElementFactory::make("udpsink")
+            .property("host", host)
+            .property("port", port as i32)
+            .property("sync", true) // Se vuoi sincronizzazione con il clock di sistema
+            .property("async", true)
+            .build()
+            .unwrap();
 
-            pipeline.set_state(gstreamer::State::Playing).unwrap();
+        pipeline
+            .add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &appsink])
+            .unwrap();
+        appsrc.link(&queue).unwrap();
+        queue.link(&convert).unwrap();
+        convert.link(&encoder).unwrap();
+        encoder.link(&rtp_pay).unwrap();
+        rtp_pay.link(&appsink).unwrap();
 
-            return (pipeline, src, sink);
-        });
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+
+        let appsrc = appsrc.downcast::<AppSrc>().unwrap();
+
+        self.appsrc_thread = Some(task::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+                let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
+                match appsrc.push_buffer(gsbuffer) {
+                    Ok(FlowSuccess::Ok) => (),
+                    Ok(_) => eprintln!("Frame push returned non-Ok flow"),
+                    Err(err) => eprintln!("Error pushing frame: {:?}", err),
+                }
+            }
+        }));
     }
 
-    fn init_channel(&mut self) {
-        let config = self.config.clone();
+    fn setup_appsink(&mut self, config: ScreenConfig, host: &str, port: u16) {
+        let (tx, mut rx) = mpsc::channel::<Frame>(10);
+        self.channel_tx = Some(Arc::new(Mutex::new(tx)));
 
-        //self.setup_xvimagesink(config);
-        self.setup_rtp_sink(config, "0.0.0.0", 6000);
-        //self.setup_rtsp_server(config);
+        let caps = Screen::get_src_caps(config.clone());
+
+        let pipeline = Pipeline::new();
+        let appsrc = ElementFactory::make("appsrc")
+            .property("caps", caps)
+            .property("is-live", true)
+            .property("format", gstreamer::Format::Time)
+            .build()
+            .unwrap();
+
+        let queue = ElementFactory::make("queue").build().unwrap();
+        let convert = ElementFactory::make("videoconvert").build().unwrap();
+        // Encoder H.264
+        let encoder = ElementFactory::make("x264enc")
+            .property_from_str("bitrate", "8000") // Bitrate in kbps
+            .property("byte-stream", true)
+            .property_from_str("speed-preset", "ultrafast")
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .unwrap();
+
+        // Packetizzazione RTP per H.264
+        let rtp_pay = ElementFactory::make("rtph264pay")
+            //.property("config-interval", 1) // Necessario per alcuni player RTP
+            .property_from_str("aggregate-mode", "zero-latency")
+            .build()
+            .unwrap();
+
+        let appsink = ElementFactory::make("appsink").build().unwrap();
+
+        pipeline
+            .add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &appsink])
+            .unwrap();
+
+        appsrc.link(&queue).unwrap();
+        queue.link(&convert).unwrap();
+        convert.link(&encoder).unwrap();
+        encoder.link(&rtp_pay).unwrap();
+        rtp_pay.link(&appsink).unwrap();
+
+        pipeline.set_state(gstreamer::State::Playing).unwrap();
+        self.appsink = appsink.downcast::<AppSink>().unwrap().into();
+
+        let appsrc = appsrc.downcast::<AppSrc>().unwrap();
+        self.appsrc_thread = Some(task::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                //println!("📡 Ricevuto frame di {:?} bytes", buffer.len());
+                let gsbuffer = gstreamer::buffer::Buffer::from_slice(frame.buffer);
+                match appsrc.push_buffer(gsbuffer) {
+                    Ok(FlowSuccess::Ok) => (),
+                    Ok(_) => eprintln!("Frame push returned non-Ok flow"),
+                    Err(err) => eprintln!("Error pushing frame: {:?}", err),
+                }
+            }
+        }));
     }
 }
 
@@ -249,9 +316,7 @@ impl Screen {
 //         let buffer = sample.buffer().unwrap();
 //         let map = buffer.map_readable().unwrap();
 //         let data = map.as_slice();
-
 //         println!("Ricevuto buffer H.264 di dimensione: {}", data.len());
-
 //         // Genera un nome di file univoco
 //         let mut count = frame_count.lock().unwrap();
 //         let filename = format!(
@@ -273,76 +338,76 @@ impl Screen {
 
 // appsink_clone.set_callbacks(callbacks);
 //fn setup_rtsp_server(&mut self, config: ScreenConfig) {
-    //     self.setup(|| {
-    //         // Configura le capacità del flusso video
-    //         let caps = Screen::get_src_caps(config.clone());
-    
-    //         // Crea il pipeline
-    //         let pipeline = Pipeline::new();
-    
-    //         // Appsrc per acquisire il flusso video
-    //         let appsrc = ElementFactory::make("appsrc")
-    //             .property("caps", caps)
-    //             .property("is-live", true)
-    //             .property("format", Format::Time)
-    //             .build()
-    //             .unwrap();
-    
-    //         let queue = ElementFactory::make("queue").build().unwrap();
-    //         let convert = ElementFactory::make("videoconvert").build().unwrap();
-    
-    //         // Encoder H.264
-    //         let encoder = ElementFactory::make("x264enc")
-    //             .property_from_str("bitrate", "8000") // Bitrate in kbps
-    //             .property("byte-stream", true)
-    //             .property_from_str("speed-preset", "ultrafast")
-    //             .property_from_str("tune", "zerolatency")
-    //             .build()
-    //             .unwrap();
-    
-    //         // RTP payload per H.264
-    //         let rtp_pay = ElementFactory::make("rtph264pay")
-    //             .property_from_str("pt", "96") // Payload type per H.264
-    //             .build()
-    //             .unwrap();
-    
-    //         pipeline.add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay]).unwrap();
-    
-    //         appsrc.link(&queue).unwrap();
-    //         queue.link(&convert).unwrap();
-    //         convert.link(&encoder).unwrap();
-    //         encoder.link(&rtp_pay).unwrap();
-    
-    //         // Configura il factory per il server RTSP
-    //         let mount_point = "/test";
-    //         let port = 9999;
-    //         let server = RTSPServer::new();
-    //         let factory = RTSPMediaFactory::new();
-    //         let mounts = RTSPMountPoints::new();
-    //         factory.set_launch(&format!(
-    //             "( appsrc name=source ! queue ! videoconvert ! x264enc bitrate=8000 speed-preset=ultrafast tune=zerolatency ! rtph264pay name=pay0 pt=96 )"
-    //         ));
-    //         factory.set_transport_mode(RTSPTransportMode::PLAY);
-    //         factory.set_shared(true);
-    //         mounts.add_factory(mount_point, factory);
-    //         server.set_mount_points(Some(&mounts));
-    //         server.set_service(&port.to_string());
-    
-    //         server.attach(None).unwrap();
+//     self.setup(|| {
+//         // Configura le capacità del flusso video
+//         let caps = Screen::get_src_caps(config.clone());
 
-    //         let media = factory.element().unwrap();
-    //         let pipeline = media.get_pipeline().unwrap();
-        
-    //         // Recupera appsrc dalla pipeline
-    //         let appsrc = pipeline.get_by_name("source").unwrap();
-        
-    //         // Stampa il messaggio di avvio
-    //         println!(
-    //             "Server RTSP avviato su rtsp://127.0.0.1:{}{}",
-    //             port, mount_point
-    //         );
-    
-    //         // Restituisci il pipeline e l'appsrc
-    //         return (pipeline, appsrc, encoder);
-    //     });
-    // }
+//         // Crea il pipeline
+//         let pipeline = Pipeline::new();
+
+//         // Appsrc per acquisire il flusso video
+//         let appsrc = ElementFactory::make("appsrc")
+//             .property("caps", caps)
+//             .property("is-live", true)
+//             .property("format", Format::Time)
+//             .build()
+//             .unwrap();
+
+//         let queue = ElementFactory::make("queue").build().unwrap();
+//         let convert = ElementFactory::make("videoconvert").build().unwrap();
+
+//         // Encoder H.264
+//         let encoder = ElementFactory::make("x264enc")
+//             .property_from_str("bitrate", "8000") // Bitrate in kbps
+//             .property("byte-stream", true)
+//             .property_from_str("speed-preset", "ultrafast")
+//             .property_from_str("tune", "zerolatency")
+//             .build()
+//             .unwrap();
+
+//         // RTP payload per H.264
+//         let rtp_pay = ElementFactory::make("rtph264pay")
+//             .property_from_str("pt", "96") // Payload type per H.264
+//             .build()
+//             .unwrap();
+
+//         pipeline.add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay]).unwrap();
+
+//         appsrc.link(&queue).unwrap();
+//         queue.link(&convert).unwrap();
+//         convert.link(&encoder).unwrap();
+//         encoder.link(&rtp_pay).unwrap();
+
+//         // Configura il factory per il server RTSP
+//         let mount_point = "/test";
+//         let port = 9999;
+//         let server = RTSPServer::new();
+//         let factory = RTSPMediaFactory::new();
+//         let mounts = RTSPMountPoints::new();
+//         factory.set_launch(&format!(
+//             "( appsrc name=source ! queue ! videoconvert ! x264enc bitrate=8000 speed-preset=ultrafast tune=zerolatency ! rtph264pay name=pay0 pt=96 )"
+//         ));
+//         factory.set_transport_mode(RTSPTransportMode::PLAY);
+//         factory.set_shared(true);
+//         mounts.add_factory(mount_point, factory);
+//         server.set_mount_points(Some(&mounts));
+//         server.set_service(&port.to_string());
+
+//         server.attach(None).unwrap();
+
+//         let media = factory.element().unwrap();
+//         let pipeline = media.get_pipeline().unwrap();
+
+//         // Recupera appsrc dalla pipeline
+//         let appsrc = pipeline.get_by_name("source").unwrap();
+
+//         // Stampa il messaggio di avvio
+//         println!(
+//             "Server RTSP avviato su rtsp://127.0.0.1:{}{}",
+//             port, mount_point
+//         );
+
+//         // Restituisci il pipeline e l'appsrc
+//         return (pipeline, appsrc, encoder);
+//     });
+// }
