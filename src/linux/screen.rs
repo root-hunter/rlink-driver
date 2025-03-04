@@ -9,13 +9,13 @@ use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use gstreamer_rtsp_server::prelude::{
     RTSPMediaFactoryExt, RTSPMountPointsExt, RTSPServerExt, RTSPServerExtManual,
 };
-use webrtc::rtp::packet::Packet;
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
-use webrtc::track::track_local::TrackLocalWriter;
 use std::str::FromStr;
 use std::{env, fs};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::{self, JoinHandle};
+use webrtc::rtp::packet::Packet;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::TrackLocalWriter;
 
 use rlink_core::protocol::frame::Frame;
 
@@ -72,7 +72,7 @@ impl Screen {
         };
     }
 
-    pub fn init(&mut self, video_track: Option<Arc<TrackLocalStaticRTP>>) -> Option<AppSink> {
+    pub fn init(&mut self, video_track: Option<Arc<TrackLocalStaticRTP>>) {
         let config = self.config.clone();
 
         //self.setup_xvimagesink(config);
@@ -80,8 +80,7 @@ impl Screen {
         //self.setup_rtp_sink(config, "0.0.0.0", 6000);
 
         //return None;
-        self.setup_appsink(config, video_track);
-        return Some(self.appsink.as_ref().unwrap().clone());
+        self.setup_udpsink(config, video_track);
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -248,7 +247,11 @@ impl Screen {
         }));
     }
 
-    fn setup_appsink(&mut self, config: ScreenConfig, video_track: Option<Arc<TrackLocalStaticRTP>>) {
+    fn setup_udpsink(
+        &mut self,
+        config: ScreenConfig,
+        video_track: Option<Arc<TrackLocalStaticRTP>>,
+    ) {
         let (tx, mut rx) = mpsc::channel::<Frame>(10);
         self.channel_tx = Some(Arc::new(Mutex::new(tx)));
 
@@ -266,7 +269,7 @@ impl Screen {
         let convert = ElementFactory::make("videoconvert").build().unwrap();
         // Encoder H.264
         let encoder = ElementFactory::make("x264enc")
-            .property_from_str("bitrate", "8000") // Bitrate in kbps
+            .property_from_str("bitrate", "500") // Bitrate in kbps
             .property("byte-stream", true)
             .property_from_str("speed-preset", "ultrafast")
             .property_from_str("tune", "zerolatency")
@@ -275,50 +278,27 @@ impl Screen {
 
         // Packetizzazione RTP per H.264
         let rtp_pay = ElementFactory::make("rtph264pay")
-            //.property("config-interval", 1) // Necessario per alcuni player RTP
-            .property_from_str("aggregate-mode", "zero-latency")
+            .property("config-interval", 1) // Necessario per alcuni player RTP
+            //.property_from_str("aggregate-mode", "zero-latency")
+            .property_from_str("pt", "96") // Necessario per alcuni player RTP
             .build()
             .unwrap();
 
-        let appsink = ElementFactory::make("appsink").build().unwrap();
-        let appsink_cast = appsink.clone().downcast::<AppSink>().unwrap();
-
-        let video_track_clone = video_track.clone();
-
-        appsink_cast.set_callbacks(
-            AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().unwrap();
-                    let buffer = sample.buffer().unwrap();
-                    let map = buffer.map_readable().unwrap();
-                    let data = map.as_slice();
-    
-                    let rtp_header = RtpHeader::new(&data);
-
-                    println!("HEADER: {:#?}", rtp_header);
-
-                    // let _ = video_track_clone.write_rtp(&Packet {
-                    //     header: webrtc::rtp::header::Header {
-                    //         ..Default::default()
-                    //     },
-                    //     payload: data.to_vec().into(),
-                    // });
-    
-                    Ok(FlowSuccess::Ok)
-                })
-                .build(),
-        );
+        let udpsink = ElementFactory::make("udpsink")
+            .property("host", "0.0.0.0") // Necessario per alcuni player RTP
+            .property("port", 9544) // Necessario per alcuni player RTP
+            .build()
+            .unwrap();
 
         pipeline
-            .add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &appsink])
+            .add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &udpsink])
             .unwrap();
-        self.appsink = appsink_cast.into();
 
         appsrc.link(&queue).unwrap();
         queue.link(&convert).unwrap();
         convert.link(&encoder).unwrap();
         encoder.link(&rtp_pay).unwrap();
-        rtp_pay.link(&appsink).unwrap();
+        rtp_pay.link(&udpsink).unwrap();
 
         pipeline.set_state(gstreamer::State::Playing).unwrap();
 
@@ -336,110 +316,3 @@ impl Screen {
         }));
     }
 }
-
-// let appsink = sink.clone().downcast::<AppSink>().unwrap(); // Conversione a AppSink
-
-// appsink.set_property("emit-signals", true);
-// let appsink_clone = appsink.clone();
-// let frame_count = std::sync::Mutex::new(0); // Contatore di frame
-// let callbacks = AppSinkCallbacks::builder()
-//     .new_sample(move |appsink| {
-//         let sample = appsink.pull_sample().unwrap();
-//         let buffer = sample.buffer().unwrap();
-//         let map = buffer.map_readable().unwrap();
-//         let data = map.as_slice();
-//         println!("Ricevuto buffer H.264 di dimensione: {}", data.len());
-//         // Genera un nome di file univoco
-//         let mut count = frame_count.lock().unwrap();
-//         let filename = format!(
-//             "/mnt/07278d6f-dcd5-4540-ae3f-dc7f08c050e4/Dev/rlink/samples/frame_{}.h264",
-//             *count
-//         );
-//         *count += 1;
-//         drop(count); // Rilascia il lock
-
-//         // Scrivi i dati del buffer nel file
-//         let path = Path::new(&filename);
-//         if let Err(e) = fs::write(path, data) {
-//             eprintln!("Errore durante la scrittura del file {}: {}", filename, e);
-//         }
-
-//         Ok(FlowSuccess::Ok)
-//     })
-//     .build();
-
-// appsink_clone.set_callbacks(callbacks);
-//fn setup_rtsp_server(&mut self, config: ScreenConfig) {
-//     self.setup(|| {
-//         // Configura le capacità del flusso video
-//         let caps = Screen::get_src_caps(config.clone());
-
-//         // Crea il pipeline
-//         let pipeline = Pipeline::new();
-
-//         // Appsrc per acquisire il flusso video
-//         let appsrc = ElementFactory::make("appsrc")
-//             .property("caps", caps)
-//             .property("is-live", true)
-//             .property("format", Format::Time)
-//             .build()
-//             .unwrap();
-
-//         let queue = ElementFactory::make("queue").build().unwrap();
-//         let convert = ElementFactory::make("videoconvert").build().unwrap();
-
-//         // Encoder H.264
-//         let encoder = ElementFactory::make("x264enc")
-//             .property_from_str("bitrate", "8000") // Bitrate in kbps
-//             .property("byte-stream", true)
-//             .property_from_str("speed-preset", "ultrafast")
-//             .property_from_str("tune", "zerolatency")
-//             .build()
-//             .unwrap();
-
-//         // RTP payload per H.264
-//         let rtp_pay = ElementFactory::make("rtph264pay")
-//             .property_from_str("pt", "96") // Payload type per H.264
-//             .build()
-//             .unwrap();
-
-//         pipeline.add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay]).unwrap();
-
-//         appsrc.link(&queue).unwrap();
-//         queue.link(&convert).unwrap();
-//         convert.link(&encoder).unwrap();
-//         encoder.link(&rtp_pay).unwrap();
-
-//         // Configura il factory per il server RTSP
-//         let mount_point = "/test";
-//         let port = 9999;
-//         let server = RTSPServer::new();
-//         let factory = RTSPMediaFactory::new();
-//         let mounts = RTSPMountPoints::new();
-//         factory.set_launch(&format!(
-//             "( appsrc name=source ! queue ! videoconvert ! x264enc bitrate=8000 speed-preset=ultrafast tune=zerolatency ! rtph264pay name=pay0 pt=96 )"
-//         ));
-//         factory.set_transport_mode(RTSPTransportMode::PLAY);
-//         factory.set_shared(true);
-//         mounts.add_factory(mount_point, factory);
-//         server.set_mount_points(Some(&mounts));
-//         server.set_service(&port.to_string());
-
-//         server.attach(None).unwrap();
-
-//         let media = factory.element().unwrap();
-//         let pipeline = media.get_pipeline().unwrap();
-
-//         // Recupera appsrc dalla pipeline
-//         let appsrc = pipeline.get_by_name("source").unwrap();
-
-//         // Stampa il messaggio di avvio
-//         println!(
-//             "Server RTSP avviato su rtsp://127.0.0.1:{}{}",
-//             port, mount_point
-//         );
-
-//         // Restituisci il pipeline e l'appsrc
-//         return (pipeline, appsrc, encoder);
-//     });
-// }

@@ -31,16 +31,14 @@ use webrtc::{
     },
 };
 
-use xiu;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env::set_var("GST_DEBUG", "3");
     gstreamer::init()?;
 
-
     let mut screen = Screen::new(1920, 1080, 30);
-    let appsink = screen.init(None).unwrap();
+    screen.init(None);
     screen.start().await?;
 
     Ok(())
