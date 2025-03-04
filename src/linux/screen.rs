@@ -9,6 +9,9 @@ use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use gstreamer_rtsp_server::prelude::{
     RTSPMediaFactoryExt, RTSPMountPointsExt, RTSPServerExt, RTSPServerExtManual,
 };
+use webrtc::rtp::packet::Packet;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::TrackLocalWriter;
 use std::str::FromStr;
 use std::{env, fs};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -25,6 +28,8 @@ use gstreamer::{
 };
 use gstreamer::{Caps, ElementFactory, FlowSuccess, Format, Pipeline};
 use gstreamer_rtsp_server::{RTSPMediaFactory, RTSPMountPoints, RTSPServer, RTSPTransportMode};
+
+use rlink_core::protocol::rtp_header::RtpHeader;
 
 pub const AWAIT_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const UPDATE_BUFFER_TIMEOUT: Duration = Duration::from_millis(33);
@@ -67,16 +72,16 @@ impl Screen {
         };
     }
 
-    pub fn init(&mut self) -> Option<AppSink> {
+    pub fn init(&mut self, video_track: Option<Arc<TrackLocalStaticRTP>>) -> Option<AppSink> {
         let config = self.config.clone();
 
         //self.setup_xvimagesink(config);
         //self.setup_rtsp_server(config);    }
-        //self.setup_appsink(config, "0.0.0.0", 6000);
-        self.setup_rtp_sink(config, "0.0.0.0", 6000);
+        //self.setup_rtp_sink(config, "0.0.0.0", 6000);
 
-        return None;
-        //return self.appsink.as_ref().unwrap().clone();
+        //return None;
+        self.setup_appsink(config, video_track);
+        return Some(self.appsink.as_ref().unwrap().clone());
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -243,7 +248,7 @@ impl Screen {
         }));
     }
 
-    fn setup_appsink(&mut self, config: ScreenConfig, host: &str, port: u16) {
+    fn setup_appsink(&mut self, config: ScreenConfig, video_track: Option<Arc<TrackLocalStaticRTP>>) {
         let (tx, mut rx) = mpsc::channel::<Frame>(10);
         self.channel_tx = Some(Arc::new(Mutex::new(tx)));
 
@@ -276,10 +281,38 @@ impl Screen {
             .unwrap();
 
         let appsink = ElementFactory::make("appsink").build().unwrap();
+        let appsink_cast = appsink.clone().downcast::<AppSink>().unwrap();
+
+        let video_track_clone = video_track.clone();
+
+        appsink_cast.set_callbacks(
+            AppSinkCallbacks::builder()
+                .new_sample(move |appsink| {
+                    let sample = appsink.pull_sample().unwrap();
+                    let buffer = sample.buffer().unwrap();
+                    let map = buffer.map_readable().unwrap();
+                    let data = map.as_slice();
+    
+                    let rtp_header = RtpHeader::new(&data);
+
+                    println!("HEADER: {:#?}", rtp_header);
+
+                    // let _ = video_track_clone.write_rtp(&Packet {
+                    //     header: webrtc::rtp::header::Header {
+                    //         ..Default::default()
+                    //     },
+                    //     payload: data.to_vec().into(),
+                    // });
+    
+                    Ok(FlowSuccess::Ok)
+                })
+                .build(),
+        );
 
         pipeline
             .add_many(&[&appsrc, &queue, &convert, &encoder, &rtp_pay, &appsink])
             .unwrap();
+        self.appsink = appsink_cast.into();
 
         appsrc.link(&queue).unwrap();
         queue.link(&convert).unwrap();
@@ -288,7 +321,6 @@ impl Screen {
         rtp_pay.link(&appsink).unwrap();
 
         pipeline.set_state(gstreamer::State::Playing).unwrap();
-        self.appsink = appsink.downcast::<AppSink>().unwrap().into();
 
         let appsrc = appsrc.downcast::<AppSrc>().unwrap();
         self.appsrc_thread = Some(task::spawn(async move {
